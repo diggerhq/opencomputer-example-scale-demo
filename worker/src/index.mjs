@@ -123,9 +123,9 @@ export class Collector {
   }
 
   // The real fan-out. Runs entirely inside this DO: for each cell, create a
-  // session then admit one turn carrying {collector, cell}. The agent pings
-  // back over public HTTP to this same Worker.
-  async fanout({ apiKey, baseUrl, agentId, n, concurrency, origin, runId }) {
+  // session then admit one turn carrying {cell}. The agent pings back over
+  // MCP (or plain HTTP for the local flow) to this same Worker.
+  async fanout({ apiKey, baseUrl, agentId, n, concurrency, origin, runId, keyHash }) {
     const run = { id: runId, target: n, done: 0, failed: 0 };
     this.activeRun = run;
     const headers = (idem) => ({
@@ -136,8 +136,12 @@ export class Collector {
     const postJson = (path, body, idem) =>
       fetch(`${baseUrl}${path}`, { method: "POST", headers: headers(idem), body: JSON.stringify(body) });
 
+    const isFatal = (status) => status === 401 || status === 403 || status === 404;
     let next = 0;
     const work = async (cell) => {
+      // Bail on an aborted run (reset) or a config-level failure (bad key,
+      // missing deployment) — every remaining cell would fail identically.
+      if (run.fatal || this.runs.get(keyHash) !== runId) return;
       try {
         const created = await postJson("/sessions", {
           agentId,
@@ -149,6 +153,7 @@ export class Collector {
             run.lastError = `sessions ${created.status}: ${(await created.text()).slice(0, 300)}`;
             console.log(run.lastError);
           }
+          if (isFatal(created.status)) run.fatal = run.lastError;
           return;
         }
         const { session } = await created.json();
@@ -164,6 +169,7 @@ export class Collector {
             run.lastError = `turns ${turn.status}: ${(await turn.text()).slice(0, 300)}`;
             console.log(run.lastError);
           }
+          if (isFatal(turn.status)) run.fatal = run.lastError;
         }
       } catch (err) {
         run.failed += 1;
@@ -262,6 +268,8 @@ export class Collector {
       this.stopSims();
       this.cells.clear();
       this.startedAt = null;
+      this.activeRun = null;
+      this.runs.clear(); // drops every run lock; in-flight fanouts see the missing entry and exit
       this.state.waitUntil(this.clearPersisted());
       this.broadcast({ type: "reset" });
       return Response.json({ ok: true });
@@ -288,7 +296,7 @@ export class Collector {
       this.broadcast({ type: "reset" });
       const origin = `${url.protocol}//${url.host}`;
       this.state.waitUntil(
-        this.fanout({ apiKey, baseUrl, agentId, n, concurrency, origin, runId })
+        this.fanout({ apiKey, baseUrl, agentId, n, concurrency, origin, runId, keyHash })
           .finally(() => this.runs.delete(keyHash)),
       );
       return Response.json({ ok: true, runId, n, concurrency }, { status: 202 });
