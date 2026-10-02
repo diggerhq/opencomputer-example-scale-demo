@@ -46,12 +46,14 @@ export class Collector {
     this.startedAt = null;
     this.runs = new Map(); // sha256(apiKey) -> runId (one active run per key)
     this.activeRun = null; // {id, target, done, failed, lastError?}
+    this.lastRun = null; // finished-run summary so late viewers see failures
     // In-memory state survives only while the DO is hot; persist so a late
     // viewer still sees the finished run after eviction.
     this.state.blockConcurrencyWhile(async () => {
       const stored = await this.state.storage.list({ prefix: "cell:" });
       for (const [key, val] of stored) this.cells.set(Number(key.slice(5)), val);
       this.startedAt = (await this.state.storage.get("startedAt")) ?? null;
+      this.lastRun = (await this.state.storage.get("lastRun")) ?? null;
     });
   }
 
@@ -63,7 +65,7 @@ export class Collector {
   async clearPersisted() {
     this.state.storage.put("startedAt", this.startedAt);
     const stored = await this.state.storage.list({ prefix: "cell:" });
-    await this.state.storage.delete([...stored.keys()]);
+    await this.state.storage.delete([...stored.keys(), "lastRun"]);
   }
 
   stopSims() {
@@ -186,7 +188,10 @@ export class Collector {
       for (let cell; (cell = next++) < n; ) await work(cell);
     };
     await Promise.all(Array.from({ length: concurrency }, worker));
-    this.broadcast({ type: "fanout", run: { id: runId, done: run.done, failed: run.failed, target: n, finished: true } });
+    const summary = { id: runId, done: run.done, failed: run.failed, target: n, finished: true, lastError: run.lastError };
+    this.lastRun = summary;
+    this.state.waitUntil(this.state.storage.put("lastRun", summary));
+    this.broadcast({ type: "fanout", run: summary });
     this.activeRun = null;
   }
 
@@ -257,6 +262,7 @@ export class Collector {
     if (request.method === "POST" && url.pathname === "/simulate") {
       this.stopSims();
       this.cells.clear();
+      this.lastRun = null;
       this.startedAt = Date.now();
       this.state.waitUntil(this.clearPersisted());
       this.broadcast({ type: "reset" });
@@ -269,6 +275,7 @@ export class Collector {
       this.cells.clear();
       this.startedAt = null;
       this.activeRun = null;
+      this.lastRun = null;
       this.runs.clear(); // drops every run lock; in-flight fanouts see the missing entry and exit
       this.state.waitUntil(this.clearPersisted());
       this.broadcast({ type: "reset" });
@@ -291,6 +298,7 @@ export class Collector {
       this.runs.set(keyHash, runId);
       this.stopSims();
       this.cells.clear();
+      this.lastRun = null;
       this.startedAt = Date.now();
       this.state.waitUntil(this.clearPersisted());
       this.broadcast({ type: "reset" });
@@ -311,7 +319,8 @@ export class Collector {
         startedAt: this.startedAt,
         elapsedMs: this.startedAt ? Date.now() - this.startedAt : 0,
         run: this.activeRun,
-        lastError: this.activeRun?.lastError ?? null,
+        lastError: this.activeRun?.lastError ?? this.lastRun?.lastError ?? null,
+        lastRun: this.lastRun,
       });
     }
 

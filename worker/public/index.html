@@ -299,7 +299,7 @@ es.onmessage = (m) => {
   else if (e.type === "fanout") {
     const r = e.run;
     elRunStatus.textContent = r.finished
-      ? `run complete: ${r.done} dispatched, ${r.failed} failed`
+      ? `run complete: ${r.done} dispatched, ${r.failed} failed${r.lastError ? " — " + String(r.lastError).slice(0, 120) : ""}`
       : `dispatching… ${r.done + r.failed}/${r.target}${r.failed ? ` (${r.failed} failed)` : ""}`;
   }
   else if (e.type === "snapshot") {
