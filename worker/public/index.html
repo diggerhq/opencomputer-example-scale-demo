@@ -131,6 +131,14 @@ elNAgents.value = N;
 elNAgents.max = N;
 elRateIn.value = Math.min(12000, Math.max(1000, Math.round(N / 15)));
 
+// /run broadcasts a reset that reloads the page to clear the board — keep
+// the run form's values across that reload (and only for this tab).
+const FORM_FIELDS = ["apiKey", "agentId", "baseUrl", "conc"];
+try {
+  const saved = JSON.parse(sessionStorage.getItem("runForm") || "{}");
+  for (const id of FORM_FIELDS) if (saved[id]) document.getElementById(id).value = saved[id];
+} catch {}
+
 // ── Point cloud ─────────────────────────────────────────────────────────────
 const scatter = new Float32Array(N * 3); // dark noise cloud
 const target = new Float32Array(N * 3);  // logo position
@@ -295,7 +303,14 @@ es.onmessage = (m) => {
   const e = JSON.parse(m.data);
   if (e.type === "created") markCreated(e.cell);
   else if (e.type === "ping") markPing(e.cell);
-  else if (e.type === "reset") location.reload();
+  else if (e.type === "reset") {
+    try {
+      const saved = {};
+      for (const id of FORM_FIELDS) saved[id] = document.getElementById(id).value;
+      sessionStorage.setItem("runForm", JSON.stringify(saved));
+    } catch {}
+    location.reload();
+  }
   else if (e.type === "fanout") {
     const r = e.run;
     elRunStatus.textContent = r.finished
