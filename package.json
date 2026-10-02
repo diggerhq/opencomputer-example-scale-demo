@@ -1,0 +1,18 @@
+{
+  "name": "opencomputer-example-scale-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "npx --package @opencomputer/cli opencomputer deploy",
+    "session": "npx --package @opencomputer/cli opencomputer session",
+    "server": "node server/index.mjs",
+    "fanout": "node fanout.mjs",
+    "demo": "node demo.mjs"
+  },
+  "dependencies": {
+    "@opencomputer/agent": "^0.5.0",
+    "@opencomputer/sdk": "^2.3.0",
+    "cloudflared": "^0.7.3"
+  }
+}

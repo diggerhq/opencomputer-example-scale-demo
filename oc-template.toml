@@ -1,0 +1,11 @@
+schema = 1
+
+[template]
+name = "Scale Demo"
+description = "Spin up thousands of serverless agent sessions, each pinging a shared server that paints the OpenComputer logo."
+documentation = "https://github.com/diggerhq/opencomputer-example-scale-demo"
+default_project_name = "scale-demo"
+
+[template.first_run]
+agent = "pinger"
+prompt = "Ping the demo server."

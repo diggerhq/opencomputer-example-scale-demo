@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OpenComputer — agent scale demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: light; }
+  html, body { margin: 0; height: 100%; background: #f4f4f1; overflow: hidden;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #3c4048; }
+  #scene { position: fixed; inset: 0; }
+  .hud { position: fixed; z-index: 2; pointer-events: none; }
+  .hud > * { pointer-events: auto; }
+  #brand { top: 22px; left: 26px; }
+  #brand .mark { font-size: 13px; letter-spacing: .18em; color: #7a7e8c; text-transform: uppercase; }
+  #count { margin-top: 10px; font-size: 46px; font-weight: 700; color: #17181c; line-height: 1; }
+  #count small { font-size: 15px; font-weight: 400; color: #8a8e9c; }
+  #sub { margin-top: 8px; font-size: 12px; color: #7a7e8c; }
+  #controls { top: 22px; right: 26px; display: flex; flex-direction: column; gap: 8px;
+    background: rgba(255,255,255,.78); border: 1px solid #dddcd6; border-radius: 10px;
+    padding: 14px 16px; width: 210px; backdrop-filter: blur(6px); }
+  #controls label { font-size: 11px; color: #7a7e8c; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+  #controls input { width: 78px; background: #fff; border: 1px solid #d8d7d0; border-radius: 6px;
+    color: #17181c; font: inherit; font-size: 12px; padding: 4px 7px; }
+  #controls button { margin-top: 4px; background: #6366f1; color: #fff; border: 0; border-radius: 7px;
+    font: inherit; font-size: 12px; font-weight: 600; padding: 8px 10px; cursor: pointer; }
+  #controls button.ghost { background: #e6e5df; color: #555a68; }
+  #controls button:hover { filter: brightness(1.07); }
+  #ratebox { bottom: 20px; left: 26px; right: 26px; }
+  #rateLabel { font-size: 12px; color: #7a7e8c; margin-bottom: 6px; }
+  #spark { width: 340px; height: 42px; display: block; }
+  #hint { position: fixed; bottom: 20px; right: 26px; font-size: 11px; color: #9a9ea8; text-align: right; line-height: 1.7; }
+  #idle { position: fixed; inset: 0; z-index: 3; display: flex; flex-direction: column; gap: 10px;
+    align-items: center; justify-content: center; text-align: center; pointer-events: none;
+    color: #6a6e7c; font-size: 13px; transition: opacity .6s; }
+  #idle b { color: #17181c; font-size: 15px; }
+  #idle .kbd { border: 1px solid #d8d7d0; border-radius: 6px; background: #fff; padding: 2px 8px; }
+  #idle.gone { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<div class="hud" id="brand">
+  <div class="mark">OpenComputer · serverless agents</div>
+  <div id="count">0<small> sessions</small></div>
+  <div id="sub">waiting for the fan-out…</div>
+</div>
+
+<div class="hud" id="controls">
+  <label>agents <input id="nAgents" type="number" value="1000" min="1" max="1000000"></label>
+  <label>rate /s <input id="rate" type="number" value="120" min="1" max="50000"></label>
+  <button id="sim">Simulate run</button>
+  <button id="reset" class="ghost">Reset</button>
+</div>
+
+<div class="hud" id="ratebox">
+  <div id="rateLabel">0 agents/s</div>
+  <canvas id="spark" width="680" height="84"></canvas>
+</div>
+
+<div id="hint">points fly in on session create · ignite on agent ping<br/>drag to orbit · scroll to zoom</div>
+
+<div id="idle">
+  <b>No agents yet</b>
+  <div>hit <span class="kbd">Simulate run</span> for a fake fan-out, or launch fanout.mjs for the real thing</div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const qs = new URLSearchParams(location.search);
+const N = Math.min(Math.max(Number(qs.get("n") || 200_000), 1000), 1_500_000);
+const BRAND = new THREE.Color("#6366f1");
+
+// ── Logo targets: rasterize the OC mark + wordmark, keep white pixels ────────
+const LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 60">
+  <text x="14" y="46" font-family="system-ui,Segoe UI,sans-serif" font-size="52" font-weight="800" fill="white">opencomputer</text>
+</svg>`;
+
+async function logoTargets() {
+  const W = 2400, H = 264; // oversized; cropped to the drawn pixels below
+  const img = new Image();
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(LOGO_SVG);
+  await img.decode();
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, W, H);
+  const { data } = ctx.getImageData(0, 0, W, H);
+  const pts = [];
+  let minX = W, maxX = 0, minY = H, maxY = 0;
+  for (let y = 0; y < H; y += 1)
+    for (let x = 0; x < W; x += 1) {
+      const a = data[(y * W + x) * 4 + 3];
+      const r = data[(y * W + x) * 4];
+      if (a > 90 && r > 140) {
+        pts.push([x, y]);
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+  return { pts, minX, minY, spanX: maxX - minX + 1, spanY: maxY - minY + 1 };
+}
+
+const logo = await logoTargets();
+
+// Defaults match the point-field size: a run of N agents fills the whole mark
+const elNAgents = document.getElementById("nAgents");
+const elRateIn = document.getElementById("rate");
+elNAgents.value = N;
+elNAgents.max = N;
+elRateIn.value = Math.min(12000, Math.max(1000, Math.round(N / 15)));
+
+// ── Point cloud ─────────────────────────────────────────────────────────────
+const scatter = new Float32Array(N * 3); // dark noise cloud
+const target = new Float32Array(N * 3);  // logo position
+const info = new Float32Array(N * 3);    // [t0 flight start, tPing ignite, flight dur]
+const noise = new Float32Array(N * 3);   // per-point randomness
+
+const WORLD_W = 84;
+const sx = (x) => ((x - logo.minX) / logo.spanX - 0.5) * WORLD_W;
+const sy = (y) => (0.5 - (y - logo.minY) / logo.spanY) * (WORLD_W * logo.spanY / logo.spanX);
+
+for (let i = 0; i < N; i++) {
+  const r = 34 + 26 * Math.cbrt(Math.random());
+  const th = Math.random() * Math.PI * 2;
+  const ph = Math.acos(2 * Math.random() - 1);
+  scatter.set([r * Math.sin(ph) * Math.cos(th), r * Math.sin(ph) * Math.sin(th), r * Math.cos(ph)], i * 3);
+  const [lx, ly] = logo.pts[Math.floor(Math.random() * logo.pts.length)];
+  target.set([sx(lx), sy(ly), (Math.random() - 0.5) * 11], i * 3); // ~11u slab: reads as a 3D extrusion
+  info.set([-1, -1, 0.9 + Math.random() * 1.1], i * 3);
+  const n = new THREE.Vector3().randomDirection();
+  noise.set([n.x, n.y, n.z], i * 3);
+}
+
+const geo = new THREE.BufferGeometry();
+geo.setAttribute("position", new THREE.BufferAttribute(scatter, 3));
+geo.setAttribute("aTarget", new THREE.BufferAttribute(target, 3));
+geo.setAttribute("aInfo", new THREE.BufferAttribute(info, 3));
+geo.setAttribute("aNoise", new THREE.BufferAttribute(noise, 3));
+geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1000);
+
+const mat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+  uniforms: {
+    uTime: { value: 0 },
+    uSize: { value: Math.max(0.012, 2.8 / Math.cbrt(N / 2000)) }, // world-ish size
+    uBrand: { value: new THREE.Vector3(BRAND.r, BRAND.g, BRAND.b) },
+  },
+  vertexShader: /* glsl */ `
+    attribute vec3 aTarget;
+    attribute vec3 aInfo;   // t0, tPing, dur
+    attribute vec3 aNoise;
+    uniform float uTime, uSize;
+    uniform vec3 uBrand;
+    varying vec3 vColor;
+    varying float vAlpha;
+
+    void main() {
+      float fly = aInfo.x < 0.0 ? 0.0 : clamp((uTime - aInfo.x) / aInfo.z, 0.0, 1.0);
+      fly = fly * fly * (3.0 - 2.0 * fly);
+      float lit = aInfo.y >= 0.0 ? 1.0 : 0.0;
+      float e = max(fly, lit);
+
+      vec3 pos = mix(position, aTarget, e);
+      pos += aNoise * sin(3.14159 * fly) * 6.0;          // arc while flying
+
+      float seed = fract(aNoise.x * 12.9898 + aNoise.y * 78.233);
+      vec3 dim  = vec3(0.72, 0.72, 0.70) * (0.88 + 0.12 * sin(uTime * 2.2 + seed * 40.0)); // paper dust
+      vec3 flyC = vec3(0.48, 0.49, 0.58);
+      float pulse = lit * exp(-(uTime - aInfo.y) * 2.2); // ignition flash
+      vec3 litC = mix(vec3(0.09, 0.09, 0.11), uBrand, clamp(pulse, 0.0, 1.0));
+
+      vColor = fly < 1.0 && lit < 0.5 ? mix(dim, flyC, fly) : litC;
+      if (lit < 0.5 && fly >= 1.0) vColor = flyC;
+      vAlpha = mix(0.45, 1.0, max(fly, lit));
+
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      gl_PointSize = uSize * (300.0 / -mv.z) * (1.0 + pulse);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: /* glsl */ `
+    varying vec3 vColor;
+    varying float vAlpha;
+    void main() {
+      vec2 d = gl_PointCoord - 0.5;
+      float a = smoothstep(0.5, 0.08, length(d));
+      gl_FragColor = vec4(vColor, a * vAlpha);
+    }`,
+});
+
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("scene"), antialias: true, alpha: true });
+renderer.setClearColor(0x000000, 0);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 1, 4000);
+camera.position.set(52, 30, 105); // angled: the slab depth reads as 3D
+const cloud = new THREE.Points(geo, mat);
+scene.add(cloud);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.7;
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+}
+addEventListener("resize", resize);
+resize();
+
+// ── HUD ─────────────────────────────────────────────────────────────────────
+const elCount = document.getElementById("count");
+const elSub = document.getElementById("sub");
+const elRate = document.getElementById("rateLabel");
+const spark = document.getElementById("spark").getContext("2d");
+let created = 0, pinged = 0, t0 = null;
+const rateWindow = [];
+
+function hud(now) {
+  elCount.innerHTML = `${pinged.toLocaleString()}<small> / ${created.toLocaleString()} sessions</small>`;
+  if (t0) {
+    const s = (now - t0) / 1000;
+    elSub.textContent = `${s.toFixed(1)}s elapsed`;
+  }
+  rateWindow.push([now, pinged]);
+  while (rateWindow.length && rateWindow[0][0] < now - 5000) rateWindow.shift();
+  const span = Math.max((now - (rateWindow[0]?.[0] ?? now)) / 1000, 0.5);
+  const rate = rateWindow.length > 1 ? (pinged - rateWindow[0][1]) / span : 0;
+  elRate.textContent = `${Math.round(rate).toLocaleString()} agents/s`;
+  spark.clearRect(0, 0, 680, 84);
+  spark.strokeStyle = "#6366f1";
+  spark.beginPath();
+  const max = Math.max(...rateWindow.map(([, p], i) => (i ? p - rateWindow[i - 1][1] : 0) / 0.1), 1);
+  rateWindow.forEach(([t, p], i) => {
+    const x = ((t - (rateWindow[0]?.[0] ?? t)) / 5000) * 680;
+    const y = 84 - (((i ? p - rateWindow[i - 1][1] : 0) / 0.1) / max) * 80;
+    i ? spark.lineTo(x, y) : spark.moveTo(x, y);
+  });
+  spark.stroke();
+}
+
+// ── Events ──────────────────────────────────────────────────────────────────
+const attr = geo.attributes.aInfo;
+let dirty = false;
+const now = () => performance.now() / 1000;
+
+const elIdle = document.getElementById("idle");
+function markCreated(cell) {
+  if (cell < 0 || cell >= N) return;
+  elIdle.classList.add("gone");
+  if (info[cell * 3] < 0) {
+    info[cell * 3] = now();
+    dirty = true;
+  }
+  created = Math.max(created, cell + 1);
+  if (!t0) t0 = performance.now();
+}
+function markPing(cell) {
+  if (cell < 0 || cell >= N) return;
+  const o = cell * 3;
+  if (info[o + 1] >= 0) return;
+  if (info[o] < 0) info[o] = now() - info[o + 2] * 0.4; // never saw the create: arrive fast
+  info[o + 1] = now();
+  dirty = true;
+  pinged += 1;
+}
+
+const es = new EventSource("/events");
+es.onmessage = (m) => {
+  const e = JSON.parse(m.data);
+  if (e.type === "created") markCreated(e.cell);
+  else if (e.type === "ping") markPing(e.cell);
+  else if (e.type === "reset") location.reload();
+  else if (e.type === "snapshot") {
+    if (e.cells.length) elIdle.classList.add("gone");
+    created = 0; pinged = 0;
+    for (const [cell, state] of e.cells) {
+      const o = cell * 3;
+      if (o >= info.length) continue;
+      if (state >= 1 && info[o] < 0) info[o] = now() - info[o + 2];
+      if (state === 2) { info[o + 1] = Math.max(0.01, now() - 2); pinged += 1; }
+      created = Math.max(created, cell + 1);
+    }
+    dirty = true;
+  }
+};
+
+// ── Controls ────────────────────────────────────────────────────────────────
+document.getElementById("sim").onclick = () =>
+  fetch("/simulate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ count: +elNAgents.value, rate: +elRateIn.value, delay: 900 }),
+  });
+document.getElementById("reset").onclick = () => fetch("/reset", { method: "POST" });
+
+// ?auto → start a simulated run on load when the server is idle
+if (qs.get("auto")) {
+  fetch("/stats").then((r) => r.json()).then((s) => {
+    if (s.created || s.pinged) return;
+    fetch("/simulate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        count: Math.min(N, +qs.get("count") || N),
+        rate: +qs.get("rate") || Math.min(12000, Math.max(2000, N / 15)),
+        delay: 800,
+      }),
+    });
+  });
+}
+
+// ── Loop ────────────────────────────────────────────────────────────────────
+window.__dbg = { renderer, scene, geo, mat, info, THREE, frames: 0 };
+renderer.setAnimationLoop(() => {
+  window.__dbg.frames++;
+  mat.uniforms.uTime.value = performance.now() / 1000;
+  if (dirty) { attr.needsUpdate = true; dirty = false; }
+  controls.update();
+  hud(performance.now());
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

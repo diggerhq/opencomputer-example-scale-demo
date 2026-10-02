@@ -1,0 +1,16 @@
+name = "scale-demo"
+main = "src/index.mjs"
+compatibility_date = "2026-10-02"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[durable_objects]
+bindings = [
+  { name = "COLLECTOR", class_name = "Collector" },
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Collector"]
