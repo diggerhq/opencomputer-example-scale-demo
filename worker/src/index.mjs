@@ -8,8 +8,24 @@
 //                      fanout executes inside this DO against the managed API
 //   POST /reset     -> clear all cells
 //   GET  /stats     -> JSON counters
+//   POST /mcp       -> MCP (Streamable HTTP, stateless): the agent's ping
+//                      call lands here directly — no tool sandbox involved
 //
 // The apiKey is used only for the duration of /run and never persisted.
+
+const PING_TOOL = {
+  name: "ping",
+  description:
+    "Ignite one cell on the scale-demo board. Call exactly once with the cell index you were assigned.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      cell: { type: "integer", description: "The cell index assigned to this session" },
+      sessionId: { type: "string", description: "Your session id, if you know it" },
+    },
+    required: ["cell"],
+  },
+};
 
 const MAX_N = 10_000;
 const MAX_CONCURRENCY = 50;
@@ -140,7 +156,7 @@ export class Collector {
         this.emitCreated(cell);
         const turn = await postJson(`/sessions/${session.id}/turns`, {
           input: "Ping the demo server, then stop.",
-          payload: { collector: origin, cell },
+          payload: { cell }, // no collector URL -> the agent uses its MCP ping
         }, `${runId}/${cell}/turn`);
         if (!turn.ok) {
           run.failed += 1;
@@ -195,6 +211,32 @@ export class Collector {
     }
 
     const body = request.method === "POST" ? await request.json().catch(() => ({})) : {};
+
+    if (request.method === "POST" && url.pathname === "/mcp") {
+      const rpc = body;
+      const result = (res) => Response.json({ jsonrpc: "2.0", id: rpc.id ?? null, result: res });
+      const error = (code, message) =>
+        Response.json({ jsonrpc: "2.0", id: rpc.id ?? null, error: { code, message } });
+      if (rpc.method === "initialize") {
+        return result({
+          protocolVersion: rpc.params?.protocolVersion ?? "2025-03-26",
+          capabilities: { tools: {} },
+          serverInfo: { name: "scale-demo-collector", version: "1.0.0" },
+        });
+      }
+      if (typeof rpc.method === "string" && rpc.method.startsWith("notifications/")) {
+        return new Response(null, { status: 202 });
+      }
+      if (rpc.method === "ping") return result({});
+      if (rpc.method === "tools/list") return result({ tools: [PING_TOOL] });
+      if (rpc.method === "tools/call") {
+        if (rpc.params?.name !== "ping") return error(-32601, "unknown tool");
+        const cell = rpc.params?.arguments?.cell;
+        if (typeof cell === "number") this.emitPing(cell);
+        return result({ content: [{ type: "text", text: `cell ${cell} ignited` }] });
+      }
+      return error(-32601, "method not found");
+    }
 
     if (request.method === "POST" && url.pathname === "/created") {
       if (typeof body.cell === "number") this.emitCreated(body.cell);
@@ -273,7 +315,7 @@ export default {
   fetch(request, env) {
     const url = new URL(request.url);
     const API_PATHS = new Set([
-      "/events", "/created", "/ping", "/simulate", "/reset", "/run", "/stats",
+      "/events", "/created", "/ping", "/simulate", "/reset", "/run", "/stats", "/mcp",
     ]);
     if (API_PATHS.has(url.pathname)) {
       const stub = env.COLLECTOR.get(env.COLLECTOR.idFromName("cells"));

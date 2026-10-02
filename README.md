@@ -15,9 +15,13 @@ milliseconds and each one costs nothing but a model call.
 The `worker/` directory is the whole demo as one deployable unit — collector,
 fan-out, and viz inside a Cloudflare Worker + Durable Object. `cd worker &&
 npx wrangler deploy`, then open the page, paste your API key + agent id, and
-hit **Run real agents**. Nothing runs locally, and your key is only held for
-the duration of the run (caps: 10,000 agents, 50-way concurrency, one active
-run per key).
+hit **Run real agents**. The worker also serves `/mcp` — agents ping it as a
+remote MCP server, so nothing extra has to run. Nothing runs locally, and
+your key is only held for the duration of the run (caps: 10,000 agents,
+50-way concurrency, one active run per key).
+
+Point `demo-collector`'s URL in `opencomputer/agents/pinger/agent.ts` at your
+deployed worker's `/mcp` path to light up your own board.
 
 ## Or run it locally (3 commands)
 
@@ -44,8 +48,10 @@ No agents handy? The visual works standalone — `npm run server` then hit
 
 ## What's inside
 
-- `opencomputer/agents/pinger/` — the agent (~30 lines): declares `haiku-4.5`
-  and one `ping` tool that POSTs `{cell, sessionId}` to the collector.
+- `opencomputer/agents/pinger/` — the agent (~40 lines): declares `haiku-4.5`
+  and pings the collector as an MCP server (`defineMcpServer` +
+  `useMcpServer`), or via a plain `ping` tool when the turn payload carries a
+  collector URL.
 - `server/` — a zero-dependency Node collector + visualization server on
   `:8787`: serves the WebGL point-cloud page, accepts `/created` and `/ping`
   posts, streams updates over SSE.
@@ -62,9 +68,12 @@ No agents handy? The visual works standalone — `npm run server` then hit
 1. `fanout.mjs` calls `sessions.create` and immediately POSTs `/created` to
    the collector — a dim particle flies into place.
 2. The session runs on OpenComputer's serverless runtime (a Durable Object,
-   no VM). The model calls the `ping` tool, which `fetch`es
-   `${COLLECTOR_URL}/ping` **from inside the agent** — that's the real
-   ping-back, and the moment the dot ignites.
+   no VM) and the model makes an MCP `ping` call straight to the collector
+   (`POST /mcp` on the worker) — that's the real ping-back, and the moment
+   the dot ignites. In the local flow the turn payload carries a collector
+   URL instead, so the agent calls its plain `ping` tool, which `fetch`es
+   `${COLLECTOR_URL}/ping` from inside the agent. No VM is allocated on
+   either path.
 
 ## Tuning
 
