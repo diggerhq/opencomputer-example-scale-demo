@@ -8,6 +8,7 @@ const MAX_CHAINS = 256;
 const SHARD_SIZE = 100;
 const OUTBOUND_CONNECTIONS_PER_SHARD = 6;
 const MAX_ATTEMPTS = 5;
+const PROGRESS_BATCH_SIZE = 25;
 const MAX_SNAPSHOT_CELLS = 20_000;
 const DEFAULT_BASE_URL = "https://app.opencomputer.dev/api/managed-agents";
 
@@ -24,10 +25,26 @@ export class FanoutShard {
     const { apiKey, baseUrl, agentId, mode, runId, shardIndex, shardStep, totalShards, concurrency } = input;
     const first = shardIndex * SHARD_SIZE;
     const count = Math.min(SHARD_SIZE, input.target - first);
-    const result = { runId, shardIndex, attempted: 0, created: 0, createFailed: 0, turnsAdmitted: 0, turnFailed: 0, createdCells: [] };
+    const result = { runId, shardIndex, attempted: 0, created: 0, createFailed: 0, turnsAdmitted: 0, turnFailed: 0 };
     let nextOffset = 0;
     let fatal = null;
     let lastError = null;
+    const collector = this.env.COLLECTOR.get(this.env.COLLECTOR.idFromName("cells"));
+    const pendingCreatedCells = [];
+    let progressDelivery = Promise.resolve();
+    const queueProgress = (force = false) => {
+      if (!pendingCreatedCells.length || (!force && pendingCreatedCells.length < PROGRESS_BATCH_SIZE)) return;
+      const cells = pendingCreatedCells.splice(0, pendingCreatedCells.length);
+      progressDelivery = progressDelivery.then(async () => {
+        const response = await collector.fetch(
+          "https://collector.internal/progress",
+          jsonRequest({ runId, cells }),
+        );
+        await response.arrayBuffer();
+      }).catch((error) => {
+        console.warn("progress delivery failed", String(error?.message || error));
+      });
+    };
     const post = (path, body, key) => fetch(`${baseUrl}${path}`, {
       method: "POST",
       headers: {
@@ -72,7 +89,8 @@ export class FanoutShard {
           }
           const body = await created.json();
           result.created += 1;
-          result.createdCells.push(cell);
+          pendingCreatedCells.push(cell);
+          queueProgress();
           if (mode === "create") continue;
           const turn = await postWithRetry(`/sessions/${body.session.id}/turns`, { input: "Ping the demo server, then stop.", payload: { cell } }, `${runId}/${cell}/turn`);
           if (turn.ok) result.turnsAdmitted += 1;
@@ -88,7 +106,8 @@ export class FanoutShard {
       }
     };
     await Promise.all(Array.from({ length: Math.min(concurrency, count) }, work));
-    const collector = this.env.COLLECTOR.get(this.env.COLLECTOR.idFromName("cells"));
+    queueProgress(true);
+    await progressDelivery;
     const recorded = await collector.fetch("https://collector.internal/shard", jsonRequest({ ...result, fatal, lastError }));
     const state = await recorded.json();
     const nextShard = shardIndex + shardStep;
@@ -194,8 +213,9 @@ export class Collector {
     const run = this.activeRun;
     if (!run || run.id !== body.runId) return { active: false };
     for (const key of ["attempted", "created", "createFailed", "turnsAdmitted", "turnFailed"]) run[key] += body[key];
-    run.completedShards += 1; run.lastError ||= body.lastError || undefined; this.created = run.created;
-    this.emitCreatedBatch(body.createdCells || []);
+    run.completedShards += 1; run.lastError ||= body.lastError || undefined;
+    this.created = Math.max(this.created, run.created);
+    this.broadcast({ type: "created_batch", cells: [], created: this.created });
     const finished = Boolean(body.fatal) || run.completedShards >= run.totalShards;
     const summary = { ...run, finished };
     this.broadcast({ type: "fanout", run: summary });
@@ -207,6 +227,16 @@ export class Collector {
       await this.state.storage.put("activeRun", run);
     }
     return { active: !finished };
+  }
+
+  recordProgress(body) {
+    const run = this.activeRun;
+    if (!run || run.id !== body.runId) return { active: false };
+    const cells = Array.isArray(body.cells) ? body.cells : [];
+    for (const cell of cells) this.remember(cell, "created");
+    this.created += cells.length;
+    this.broadcast({ type: "created_batch", cells, created: this.created });
+    return { active: true };
   }
 
   async startRun(body) {
@@ -254,6 +284,7 @@ export class Collector {
     }
     const body = request.method === "POST" ? await request.json().catch(() => ({})) : {};
     if (request.method === "POST" && url.pathname === "/shard") return Response.json(await this.recordShard(body));
+    if (request.method === "POST" && url.pathname === "/progress") return Response.json(this.recordProgress(body));
     if (request.method === "POST" && url.pathname === "/mcp") {
       const result = (value) => Response.json({ jsonrpc: "2.0", id: body.id ?? null, result: value });
       const error = (code, message) => Response.json({ jsonrpc: "2.0", id: body.id ?? null, error: { code, message } });
