@@ -56,7 +56,7 @@ export class FanoutShard {
       };
       if (agentToken && path === "/sessions" && this.env.MANAGED_AGENTS) {
         return this.env.MANAGED_AGENTS.fetch(
-          new Request("https://managed-agents.internal/v1/sessions", init),
+          new Request("https://mo-oc-dev.com/v1/sessions", init),
         );
       }
       return fetch(`${baseUrl}${path}`, init);
