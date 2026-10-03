@@ -6,6 +6,10 @@ compatibility_date = "2026-10-02"
 directory = "./public"
 binding = "ASSETS"
 
+[[services]]
+binding = "MANAGED_AGENTS"
+service = "managed-agents-edge-mo-dev"
+
 [durable_objects]
 bindings = [
   { name = "COLLECTOR", class_name = "Collector" },

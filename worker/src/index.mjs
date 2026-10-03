@@ -41,18 +41,26 @@ export class FanoutShard {
         console.warn("progress delivery failed", String(error?.message || error));
       });
     };
-    const post = (path, body, key) => fetch(`${baseUrl}${path}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(agentToken
-          ? { "x-opencomputer-agent-token": agentToken }
-          : { "x-api-key": apiKey }),
-        "idempotency-key": key,
-        "x-opencomputer-scale-admission": "create-only-v1",
-      },
-      body: JSON.stringify(body),
-    });
+    const post = (path, body, key) => {
+      const init = {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(agentToken
+            ? { "x-opencomputer-agent-token": agentToken }
+            : { "x-api-key": apiKey }),
+          "idempotency-key": key,
+          "x-opencomputer-scale-admission": "create-only-v1",
+        },
+        body: JSON.stringify(body),
+      };
+      if (agentToken && path === "/sessions" && this.env.MANAGED_AGENTS) {
+        return this.env.MANAGED_AGENTS.fetch(
+          new Request("https://managed-agents.internal/v1/sessions", init),
+        );
+      }
+      return fetch(`${baseUrl}${path}`, init);
+    };
     const postWithRetry = async (path, body, key) => {
       let lastError;
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
