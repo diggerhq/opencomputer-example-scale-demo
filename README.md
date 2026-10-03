@@ -17,8 +17,14 @@ fan-out, and viz inside a Cloudflare Worker + Durable Object. `cd worker &&
 npx wrangler deploy`, then open the page, paste your API key + agent id, and
 hit **Run real agents**. The worker also serves `/mcp` — agents ping it as a
 remote MCP server, so nothing extra has to run. Nothing runs locally, and
-your key is only held for the duration of the run (caps: 10,000 agents,
-50-way concurrency, one active run per key).
+your key is only held for the duration of the run and is never persisted. The
+hosted fan-out shards work across multiple Durable Objects (cap: 1,000,000
+sessions, 2,000 in-flight requests, one active run). Up to 256 shard chains
+run concurrently, with small 100-session shards keeping work flowing between
+waves. Retryable create failures use the same idempotency key with bounded
+backoff. Million-session runs use
+the default **create sessions** mode; choose **create + model turn** only when
+you intentionally want provider traffic and cost.
 
 Point `demo-collector`'s URL in `opencomputer/agents/pinger/agent.ts` at your
 deployed worker's `/mcp` path to light up your own board.

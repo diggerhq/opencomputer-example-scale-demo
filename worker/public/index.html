@@ -59,7 +59,8 @@
   <label>api key <input id="apiKey" type="password" class="wide" placeholder="oc_…" autocomplete="off"></label>
   <label>agent id <input id="agentId" class="wide" value="scale-demo@development"></label>
   <label>api url <input id="baseUrl" class="wide" value="https://app.opencomputer.dev/api/managed-agents"></label>
-  <label>parallel <input id="conc" type="number" value="40" min="1" max="50"></label>
+  <label>parallel <input id="conc" type="number" value="2000" min="1" max="2000"></label>
+  <label>mode <select id="mode"><option value="create">create sessions</option><option value="turns">create + model turn</option></select></label>
   <button id="run">Run real agents</button>
   <div id="runStatus"></div>
   <button id="reset" class="ghost">Reset</button>
@@ -133,7 +134,7 @@ elRateIn.value = Math.min(12000, Math.max(1000, Math.round(N / 15)));
 
 // /run broadcasts a reset that reloads the page to clear the board — keep
 // the run form's values across that reload (and only for this tab).
-const FORM_FIELDS = ["apiKey", "agentId", "baseUrl", "conc"];
+const FORM_FIELDS = ["apiKey", "agentId", "baseUrl", "conc", "mode"];
 try {
   const saved = JSON.parse(sessionStorage.getItem("runForm") || "{}");
   for (const id of FORM_FIELDS) if (saved[id]) document.getElementById(id).value = saved[id];
@@ -247,19 +248,23 @@ const elSub = document.getElementById("sub");
 const elRate = document.getElementById("rateLabel");
 const spark = document.getElementById("spark").getContext("2d");
 let created = 0, pinged = 0, t0 = null;
+let activeRunMode = null, activeRunTarget = null;
 const rateWindow = [];
 
 function hud(now) {
-  elCount.innerHTML = `${pinged.toLocaleString()}<small> / ${created.toLocaleString()} sessions</small>`;
+  const primary = activeRunMode === "create" ? created : pinged;
+  const total = activeRunMode === "create" ? (activeRunTarget ?? created) : created;
+  elCount.innerHTML = `${primary.toLocaleString()}<small> / ${total.toLocaleString()} sessions</small>`;
   if (t0) {
     const s = (now - t0) / 1000;
     elSub.textContent = `${s.toFixed(1)}s elapsed`;
   }
-  rateWindow.push([now, pinged]);
+  const progress = activeRunMode === "create" ? created : pinged;
+  rateWindow.push([now, progress]);
   while (rateWindow.length && rateWindow[0][0] < now - 5000) rateWindow.shift();
   const span = Math.max((now - (rateWindow[0]?.[0] ?? now)) / 1000, 0.5);
-  const rate = rateWindow.length > 1 ? (pinged - rateWindow[0][1]) / span : 0;
-  elRate.textContent = `${Math.round(rate).toLocaleString()} agents/s`;
+  const rate = rateWindow.length > 1 ? (progress - rateWindow[0][1]) / span : 0;
+  elRate.textContent = `${Math.round(rate).toLocaleString()} ${activeRunMode === "create" ? "sessions" : "agents"}/s`;
   spark.clearRect(0, 0, 680, 84);
   spark.strokeStyle = "#6366f1";
   spark.beginPath();
@@ -285,8 +290,11 @@ function markCreated(cell) {
     info[cell * 3] = now();
     dirty = true;
   }
-  created = Math.max(created, cell + 1);
   if (!t0) t0 = performance.now();
+}
+function markCreatedBatch(cells, total) {
+  for (const cell of cells) markCreated(cell);
+  created = Math.max(created, Number(total) || 0);
 }
 function markPing(cell) {
   if (cell < 0 || cell >= N) return;
@@ -297,12 +305,18 @@ function markPing(cell) {
   dirty = true;
   pinged += 1;
 }
+function markPingBatch(cells, total) {
+  for (const cell of cells) markPing(cell);
+  pinged = Math.max(pinged, Number(total) || 0);
+}
 
 const es = new EventSource("/events");
 es.onmessage = (m) => {
   const e = JSON.parse(m.data);
   if (e.type === "created") markCreated(e.cell);
+  else if (e.type === "created_batch") markCreatedBatch(e.cells, e.created);
   else if (e.type === "ping") markPing(e.cell);
+  else if (e.type === "ping_batch") markPingBatch(e.cells, e.pinged);
   else if (e.type === "reset") {
     try {
       const saved = {};
@@ -313,20 +327,26 @@ es.onmessage = (m) => {
   }
   else if (e.type === "fanout") {
     const r = e.run;
+    activeRunMode = r.mode;
+    activeRunTarget = r.target;
     elRunStatus.textContent = r.finished
-      ? `run complete: ${r.done} dispatched, ${r.failed} failed${r.lastError ? " — " + String(r.lastError).slice(0, 120) : ""}`
-      : `dispatching… ${r.done + r.failed}/${r.target}${r.failed ? ` (${r.failed} failed)` : ""}`;
+      ? `run complete: ${r.created} created, ${r.createFailed} create failures${r.mode === "turns" ? `, ${r.turnsAdmitted} turns admitted, ${r.turnFailed} turn failures` : ""}${r.lastError ? " — " + String(r.lastError).slice(0, 120) : ""}`
+      : `dispatching… ${r.attempted}/${r.target}${r.createFailed ? ` (${r.createFailed} create failures)` : ""}`;
   }
   else if (e.type === "snapshot") {
     if (e.cells.length) elIdle.classList.add("gone");
-    created = 0; pinged = 0;
+    if (e.run) {
+      activeRunMode = e.run.mode;
+      activeRunTarget = e.run.target;
+    }
+    created = Number(e.created) || 0; pinged = 0;
     for (const [cell, state] of e.cells) {
       const o = cell * 3;
       if (o >= info.length) continue;
       if (state >= 1 && info[o] < 0) info[o] = now() - info[o + 2];
       if (state === 2) { info[o + 1] = Math.max(0.01, now() - 2); pinged += 1; }
-      created = Math.max(created, cell + 1);
     }
+    pinged = Math.max(pinged, Number(e.pinged) || 0);
     dirty = true;
   }
 };
@@ -344,6 +364,8 @@ const elRunStatus = document.getElementById("runStatus");
 const elRunBtn = document.getElementById("run");
 elRunBtn.onclick = async () => {
   elRunBtn.disabled = true;
+  activeRunMode = document.getElementById("mode").value;
+  activeRunTarget = Math.min(+elNAgents.value, 1000000);
   elRunStatus.textContent = "starting run…";
   try {
     const res = await fetch("/run", {
@@ -353,8 +375,9 @@ elRunBtn.onclick = async () => {
         apiKey: document.getElementById("apiKey").value.trim(),
         agentId: document.getElementById("agentId").value.trim(),
         baseUrl: document.getElementById("baseUrl").value.trim(),
-        n: Math.min(+elNAgents.value, 10000),
+        n: Math.min(+elNAgents.value, 1000000),
         concurrency: +document.getElementById("conc").value || 40,
+        mode: document.getElementById("mode").value,
       }),
     });
     const body = await res.json().catch(() => ({}));
@@ -369,7 +392,7 @@ elRunBtn.onclick = async () => {
 // ?auto → start a simulated run on load when the server is idle
 if (qs.get("auto")) {
   fetch("/stats").then((r) => r.json()).then((s) => {
-    if (s.created || s.pinged) return;
+    if (s.run || s.created || s.pinged) return;
     fetch("/simulate", {
       method: "POST",
       headers: { "content-type": "application/json" },

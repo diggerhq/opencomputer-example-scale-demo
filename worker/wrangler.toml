@@ -9,8 +9,13 @@ binding = "ASSETS"
 [durable_objects]
 bindings = [
   { name = "COLLECTOR", class_name = "Collector" },
+  { name = "FANOUT", class_name = "FanoutShard" },
 ]
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Collector"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["FanoutShard"]

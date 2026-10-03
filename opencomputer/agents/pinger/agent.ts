@@ -12,7 +12,7 @@ import { ping } from "./tools/ping.js";
 // hosted board; point this at your own deployed `worker/` to light up yours.
 const demoCollector = defineMcpServer({
   id: "demo-collector",
-  url: "https://scale-demo.ujn.workers.dev/mcp",
+  url: "https://scale-demo-mo-dev.ujn.workers.dev/mcp",
 });
 
 export default function Agent() {
