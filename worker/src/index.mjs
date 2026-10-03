@@ -8,6 +8,7 @@ const MAX_CHAINS = 256;
 const SHARD_SIZE = 100;
 const OUTBOUND_CONNECTIONS_PER_SHARD = 6;
 const MAX_ATTEMPTS = 5;
+const REQUEST_TIMEOUT_MS = 5_000;
 const PROGRESS_BATCH_SIZE = 25;
 const MAX_SNAPSHOT_CELLS = 20_000;
 const DEFAULT_BASE_URL = "https://app.opencomputer.dev/api/managed-agents";
@@ -53,6 +54,7 @@ export class FanoutShard {
           "x-opencomputer-scale-admission": "create-only-v1",
         },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       };
       if (agentToken && path === "/sessions" && this.env.MANAGED_AGENTS) {
         return this.env.MANAGED_AGENTS.fetch(
