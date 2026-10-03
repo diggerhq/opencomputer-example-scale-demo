@@ -12,17 +12,13 @@ const PROGRESS_BATCH_SIZE = 25;
 const MAX_SNAPSHOT_CELLS = 20_000;
 const DEFAULT_BASE_URL = "https://app.opencomputer.dev/api/managed-agents";
 
-async function sha256Hex(text) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
 const jsonRequest = (body) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
 export class FanoutShard {
   constructor(state, env) { this.state = state; this.env = env; this.running = false; }
 
   async run(input) {
-    const { apiKey, baseUrl, agentId, mode, runId, shardIndex, shardStep, totalShards, concurrency } = input;
+    const { apiKey, agentToken, baseUrl, agentId, mode, runId, shardIndex, shardStep, totalShards, concurrency } = input;
     const first = shardIndex * SHARD_SIZE;
     const count = Math.min(SHARD_SIZE, input.target - first);
     const result = { runId, shardIndex, attempted: 0, created: 0, createFailed: 0, turnsAdmitted: 0, turnFailed: 0 };
@@ -49,7 +45,9 @@ export class FanoutShard {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-api-key": apiKey,
+        ...(agentToken
+          ? { "x-opencomputer-agent-token": agentToken }
+          : { "x-api-key": apiKey }),
         "idempotency-key": key,
         "x-opencomputer-scale-admission": "create-only-v1",
       },
@@ -249,7 +247,27 @@ export class Collector {
     if (!apiKey) return Response.json({ error: "apiKey required" }, { status: 400 });
     if (!agentId) return Response.json({ error: "agentId required" }, { status: 400 });
     if (this.activeRun) return Response.json({ error: "a run is already active" }, { status: 409 });
-    const keyHash = await sha256Hex(apiKey);
+    let agentToken = "";
+    if (mode === "create") {
+      const tokenResponse = await fetch(`${baseUrl}/dev-scale-token`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "x-opencomputer-scale-admission": "create-only-v1",
+        },
+        body: JSON.stringify({ agentId }),
+      });
+      if (!tokenResponse.ok) {
+        return Response.json(
+          { error: `benchmark token ${tokenResponse.status}: ${(await tokenResponse.text()).slice(0, 300)}` },
+          { status: 502 },
+        );
+      }
+      const tokenBody = await tokenResponse.json();
+      agentToken = typeof tokenBody.token === "string" ? tokenBody.token : "";
+      if (!agentToken) return Response.json({ error: "benchmark token was missing" }, { status: 502 });
+    }
     await this.stopSimulation();
     this.cells.clear(); this.created = 0; this.pinged = 0; this.lastRun = null; this.startedAt = Date.now();
     const runId = `run-${Date.now().toString(36)}`;
@@ -264,7 +282,17 @@ export class Collector {
     await this.state.storage.deleteAll();
     await this.state.storage.put({ activeRun: this.activeRun, startedAt: this.startedAt, created: 0, pinged: 0 });
     this.broadcast({ type: "reset" });
-    const common = { apiKey, baseUrl, agentId, mode, runId, keyHash, target, shardStep: chainCount, totalShards, concurrency };
+    const common = {
+      ...(agentToken ? { agentToken } : { apiKey }),
+      baseUrl,
+      agentId,
+      mode,
+      runId,
+      target,
+      shardStep: chainCount,
+      totalShards,
+      concurrency,
+    };
     await Promise.all(Array.from({ length: chainCount }, async (_, shardIndex) => {
       const shard = this.env.FANOUT.get(this.env.FANOUT.idFromName(`${runId}:${shardIndex}`));
       await shard.fetch("https://fanout.internal/start", jsonRequest({ ...common, shardIndex }));
